@@ -9,12 +9,14 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type DisplayConfig struct {
-	Category bool `toml:"category"`
-	Winds    bool
-	Ceilings bool
+	Category  bool `toml:"category"`
+	Winds     bool
+	Ceilings  bool
+	LongLived bool
 }
 
 type Metars struct {
@@ -63,6 +65,29 @@ func FormatMetarUrl(config *MetarConfig) (url string, err error) {
 	return url + stationStr, nil
 }
 
+// drawOutput is the beginning of the formatter. Right now its handling color but will need to do more as config options
+// come up
+func drawOutput(config *MetarConfig, metars *addstogo.METARresponse) (err error) {
+	for _, m := range metars.Data.METAR {
+		output := fmt.Sprintf("%s • %s • %s", m.StationID, m.FlightCategory, m.ObservationTime.Format("020304Z"))
+		switch m.FlightCategory {
+		case "VFR":
+			fmt.Print(color.InGreen(output))
+		case "MVFR":
+			fmt.Print(color.InBlue(output))
+		case "IFR":
+			fmt.Print(color.InRed(output))
+		case "LIFR":
+			fmt.Print(color.InPurple(output))
+		default:
+			fmt.Print(output)
+		}
+
+		fmt.Print("\n", color.Reset)
+	}
+	return nil
+}
+
 // main is the cli entry point. This will get refactored into a proper CLI but for now its doing all the heavy lifting
 func main() {
 
@@ -98,25 +123,22 @@ func main() {
 	}
 	// Debug code to ensure the METARs are coming through
 	//fmt.Printf("First metar is: %s\n", metars.Data.METAR)
-
-	// This is the beginning of the formatter. Right now its handling color but will need to do more as config options
-	// come up
-	for _, m := range metars.Data.METAR {
-		output := fmt.Sprintf("%s • %s • %s", m.StationID, m.FlightCategory, m.ObservationTime.Format("020304Z"))
-		switch m.FlightCategory {
-		case "VFR":
-			fmt.Print(color.InGreen(output))
-		case "MVFR":
-			fmt.Print(color.InBlue(output))
-		case "IFR":
-			fmt.Print(color.InRed(output))
-		case "LIFR":
-			fmt.Print(color.InPurple(output))
-		default:
-			fmt.Print(output)
+	if config.Display.LongLived {
+		// Clear screen
+		fmt.Print("\033[H\033[2J")
+		for {
+			// Get back to top of terminal for re-printing each time
+			fmt.Printf("\033[0;0H")
+			err = drawOutput(&config, metars)
+			if err != nil {
+				log.Fatal(err)
+			}
+			time.Sleep(5 * time.Minute)
 		}
-
-		fmt.Print("\n", color.Reset)
+	} else {
+		err = drawOutput(&config, metars)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
-
 }
