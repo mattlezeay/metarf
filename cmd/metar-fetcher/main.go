@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"github.com/BurntSushi/toml"
 	"github.com/TwiN/go-color"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/urkk/addstogo"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -95,31 +96,38 @@ func main() {
 	config := MetarConfig{}
 	err := config.ReadConfig("metar-fetcher.toml")
 	if err != nil {
-		log.Fatalf("Unable to read config file: %s", err)
+		log.Fatal().Err(err).Msg("Unable to read config file")
+	}
+
+	// set up some logging
+	// UNIX Time is faster and smaller than most timestamps
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	if err != nil {
+		log.Error().Err(err).Msg("Unable to start logging")
 	}
 
 	// Get a usable Url for fetching the METARs
 	url, err := FormatMetarUrl(&config)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal().Err(err).Msg("")
 	}
 	// Call the endpoint
 	res, getErr := http.Get(url)
 	if getErr != nil {
-		log.Fatal(getErr)
+		log.Fatal().Err(getErr).Msg("")
 	}
 
 	// Read the body which should be xml
 	body, readErr := ioutil.ReadAll(res.Body)
 	if readErr != nil {
-		log.Fatal(readErr)
+		log.Fatal().Err(readErr).Msg("")
 	}
 
 	// Create the response to parse the xml
 	var metars *addstogo.METARresponse
 	metars, err = addstogo.UnmarshalMetars(body)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal().Err(err).Msg("")
 	}
 	// Debug code to ensure the METARs are coming through
 	//fmt.Printf("First metar is: %s\n", metars.Data.METAR)
@@ -131,14 +139,14 @@ func main() {
 			fmt.Printf("\033[0;0H")
 			err = drawOutput(&config, metars)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatal().Err(err).Msg("")
 			}
 			time.Sleep(5 * time.Minute)
 		}
 	} else {
 		err = drawOutput(&config, metars)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal().Err(err).Msg("")
 		}
 	}
 }
