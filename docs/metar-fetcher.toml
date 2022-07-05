@@ -1,0 +1,12 @@
+# Configuration file for METAR fetcher
+
+title = "METAR Fetcher"
+
+[metars]
+stations = ["KPAE", "KBFI", "KFLY", "KRNT", "KDEN", "KLAS", "KMKE", "KCEC"]
+
+[display]
+category = false
+winds = true
+ceilings = false
+longlived = true
