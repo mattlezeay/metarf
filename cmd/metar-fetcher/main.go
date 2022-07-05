@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"github.com/BurntSushi/toml"
 	"github.com/TwiN/go-color"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/urkk/addstogo"
 	"io/ioutil"
+	"metarFetcher/internal"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
+
+const LOG_FILENAME = "/tmp/metarf.log"
 
 type DisplayConfig struct {
 	Category  bool `toml:"category"`
@@ -70,7 +73,31 @@ func FormatMetarUrl(config *MetarConfig) (url string, err error) {
 // come up
 func drawOutput(config *MetarConfig, metars *addstogo.METARresponse) (err error) {
 	for _, m := range metars.Data.METAR {
-		output := fmt.Sprintf("%s • %s • %s", m.StationID, m.FlightCategory, m.ObservationTime.Format("020304Z"))
+		output := fmt.Sprintf("%s", m.StationID)
+		if config.Display.Winds {
+			output += fmt.Sprintf("•%03d%d", m.WindDirDegrees, m.WindSpeedKt)
+			if m.WindGustKt > 0 {
+				output += fmt.Sprintf("G%d", m.WindGustKt)
+			}
+			output += "KT"
+		}
+		if config.Display.Category {
+			output += fmt.Sprintf("•%s", m.FlightCategory)
+		}
+		if config.Display.Ceilings {
+			if len(m.SkyCondition) > 1 {
+				for _, sky := range m.SkyCondition {
+					if sky.SkyCover == "BKN" || sky.SkyCover == "OVC" {
+						output += fmt.Sprintf("•%d", sky.CloudBaseFtAgl)
+						break
+					}
+				}
+			} else {
+				output += "•CLR"
+			}
+
+		}
+		output += fmt.Sprintf("•%s", m.ObservationTime.Format("020304Z"))
 		switch m.FlightCategory {
 		case "VFR":
 			fmt.Print(color.InGreen(output))
@@ -89,6 +116,42 @@ func drawOutput(config *MetarConfig, metars *addstogo.METARresponse) (err error)
 	return nil
 }
 
+// fetchMetarData is the primary function for pulling METAR data and returning it deserialized into a struct
+// TODO: fix the passing of logger when this is refactored. It works, but feels strange
+func fetchMetarData(config *MetarConfig, logger *internal.Logger) (metars *addstogo.METARresponse, err error) {
+	// Get a usable Url for fetching the METARs
+	url, err := FormatMetarUrl(config)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("")
+	}
+	// Call the endpoint
+	res, getErr := http.Get(url)
+	if getErr != nil {
+		logger.Fatal().Err(getErr).Msg("")
+	}
+	logger.Info().Msgf("Fetched data from %s", url)
+
+	// Read the body which should be xml
+	xmlResponse, readErr := ioutil.ReadAll(res.Body)
+	if readErr != nil {
+		logger.Fatal().Err(readErr).Msg("")
+	}
+	// Create the response to parse the xml
+	metars, err = addstogo.UnmarshalMetars(xmlResponse)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("")
+	}
+	return metars, nil
+}
+
+func shouldPull() bool {
+	// Check if cache file is there, if it is, check if the data is stale
+	if _, err := os.Stat("/tmp/metarf_cache.tmp"); err == nil {
+		return false
+	}
+	return true
+}
+
 // main is the cli entry point. This will get refactored into a proper CLI but for now its doing all the heavy lifting
 func main() {
 
@@ -99,54 +162,41 @@ func main() {
 		log.Fatal().Err(err).Msg("Unable to read config file")
 	}
 
-	// set up some logging
-	// UNIX Time is faster and smaller than most timestamps
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	if err != nil {
-		log.Error().Err(err).Msg("Unable to start logging")
-	}
+	// Set up the logger
+	logger := internal.NewLogger(false)
+	defer logger.Close()
 
-	// Get a usable Url for fetching the METARs
-	url, err := FormatMetarUrl(&config)
-	if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
-	// Call the endpoint
-	res, getErr := http.Get(url)
-	if getErr != nil {
-		log.Fatal().Err(getErr).Msg("")
-	}
-
-	// Read the body which should be xml
-	body, readErr := ioutil.ReadAll(res.Body)
-	if readErr != nil {
-		log.Fatal().Err(readErr).Msg("")
-	}
-
-	// Create the response to parse the xml
 	var metars *addstogo.METARresponse
-	metars, err = addstogo.UnmarshalMetars(body)
-	if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
+
 	// Debug code to ensure the METARs are coming through
 	//fmt.Printf("First metar is: %s\n", metars.Data.METAR)
 	if config.Display.LongLived {
 		// Clear screen
 		fmt.Print("\033[H\033[2J")
 		for {
+			// Fetch the data
+			metars, err = fetchMetarData(&config, logger)
+			if err != nil {
+				logger.Error().Err(err).Msg("Unable to fetch METAR data")
+			}
 			// Get back to top of terminal for re-printing each time
 			fmt.Printf("\033[0;0H")
 			err = drawOutput(&config, metars)
 			if err != nil {
-				log.Fatal().Err(err).Msg("")
+				logger.Fatal().Err(err).Msg("")
 			}
 			time.Sleep(5 * time.Minute)
+
 		}
 	} else {
+		// Fetch the data then print once
+		metars, err = fetchMetarData(&config, logger)
+		if err != nil {
+			logger.Error().Err(err).Msg("Unable to fetch METAR data")
+		}
 		err = drawOutput(&config, metars)
 		if err != nil {
-			log.Fatal().Err(err).Msg("")
+			logger.Fatal().Err(err).Msg("")
 		}
 	}
 }
