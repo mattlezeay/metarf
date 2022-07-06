@@ -1,10 +1,11 @@
-package main
+package cmd
 
 import (
 	"fmt"
-	"github.com/BurntSushi/toml"
 	"github.com/TwiN/go-color"
 	"github.com/rs/zerolog/log"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/urkk/addstogo"
 	"io/ioutil"
 	"metarFetcher/internal"
@@ -14,17 +15,19 @@ import (
 	"time"
 )
 
-const LOG_FILENAME = "/tmp/metarf.log"
-
+// DisplayConfig holds the display options like winds, flight category, and if it is long lived
 type DisplayConfig struct {
 	Category  bool `toml:"category"`
-	Winds     bool
-	Ceilings  bool
-	LongLived bool
+	Winds     bool `toml:"winds"`
+	Ceilings  bool `toml:"ceilings"`
+	LongLived bool `toml:"longlived"`
+	I3Json    bool `toml:"i3json"`
 }
 
+// Metars is a container for stations and related data
 type Metars struct {
 	Stations []string
+	Cached   bool
 }
 
 // MetarConfig is the primary container for configuration
@@ -40,21 +43,6 @@ func (c *MetarConfig) FormatStations() (s string, err error) {
 		return "", fmt.Errorf("metarfetcher: no stations defined")
 	}
 	return strings.Join(c.Metars.Stations, "%20"), nil
-}
-
-// ReadConfig takes the provided configuration file and fills out the struct for later use
-// TODO: This should search for the file in known paths rather than be provided it.
-func (c *MetarConfig) ReadConfig(fileLocation string) (err error) {
-	rawConfig, err := ioutil.ReadFile(fileLocation)
-	if err != nil {
-		return fmt.Errorf("metarfetcher: error reading config file located at %s: %s\n", fileLocation, err)
-	}
-
-	_, err = toml.Decode(string(rawConfig), c)
-	if err != nil {
-		return fmt.Errorf("metarfetcher: error decoding config: %s\n", err)
-	}
-	return nil
 }
 
 // FormatMetarUrl takes the config and produces a url with the configured stations to fetch the latest METAR
@@ -73,7 +61,13 @@ func FormatMetarUrl(config *MetarConfig) (url string, err error) {
 // come up
 func drawOutput(config *MetarConfig, metars *addstogo.METARresponse) (err error) {
 	for _, m := range metars.Data.METAR {
-		output := fmt.Sprintf("%s", m.StationID)
+		var output string
+		if config.Display.I3Json {
+			output = fmt.Sprintf("{\"full_text\": \"%s", m.StationID)
+		} else {
+			output = fmt.Sprintf("%s", m.StationID)
+		}
+
 		if config.Display.Winds {
 			output += fmt.Sprintf("•%03d%d", m.WindDirDegrees, m.WindSpeedKt)
 			if m.WindGustKt > 0 {
@@ -98,20 +92,36 @@ func drawOutput(config *MetarConfig, metars *addstogo.METARresponse) (err error)
 
 		}
 		output += fmt.Sprintf("•%s", m.ObservationTime.Format("020304Z"))
-		switch m.FlightCategory {
-		case "VFR":
-			fmt.Print(color.InGreen(output))
-		case "MVFR":
-			fmt.Print(color.InBlue(output))
-		case "IFR":
-			fmt.Print(color.InRed(output))
-		case "LIFR":
-			fmt.Print(color.InPurple(output))
-		default:
+		if config.Display.I3Json {
+			switch m.FlightCategory {
+			case "VFR":
+				output += "\", \"color\": \"#008000\" }"
+			case "MVFR":
+				output += "\", \"color\": \"#0000FF\" }"
+			case "IFR":
+				output += "\", \"color\": \"#FF0000\" }"
+			case "LIFR":
+				output += "\", \"color\": \"#FF00FF\" }"
+			default:
+				output += "\", \"color\": \"#FFFFFF\" }"
+			}
 			fmt.Print(output)
+		} else {
+			switch m.FlightCategory {
+			case "VFR":
+				fmt.Print(color.InGreen(output))
+			case "MVFR":
+				fmt.Print(color.InBlue(output))
+			case "IFR":
+				fmt.Print(color.InRed(output))
+			case "LIFR":
+				fmt.Print(color.InPurple(output))
+			default:
+				fmt.Print(output)
+			}
+			fmt.Print("\n", color.Reset)
 		}
 
-		fmt.Print("\n", color.Reset)
 	}
 	return nil
 }
@@ -144,6 +154,8 @@ func fetchMetarData(config *MetarConfig, logger *internal.Logger) (metars *addst
 	return metars, nil
 }
 
+// shouldPull is the beginning of caching, its not ready yet
+// TODO: complete this function and caching logic
 func shouldPull() bool {
 	// Check if cache file is there, if it is, check if the data is stale
 	if _, err := os.Stat("/tmp/metarf_cache.tmp"); err == nil {
@@ -152,12 +164,29 @@ func shouldPull() bool {
 	return true
 }
 
-// main is the cli entry point. This will get refactored into a proper CLI but for now its doing all the heavy lifting
-func main() {
+// init is part of the cobra command prep
+func init() {
+	rootCmd.AddCommand(fetchCmd)
+}
+
+// fetchCmd is for wiring up cobra command line things. This is the default command as well
+var fetchCmd = &cobra.Command{
+	Use:   "fetch",
+	Short: "Fetch METARs from avaitionweather.gov",
+	Long: `This is the primary use of metar-fetcher. This will by default find and read in the config file
+and fetch all the relevant METARs for the configured stations`,
+	Run: func(cmd *cobra.Command, args []string) {
+		fetch()
+	},
+}
+
+// fetch is the main cli entry point. This will get refactored into a proper CLI but for now its doing all the heavy lifting
+func fetch() {
 
 	// Reads in the config primarily for the stations right now
 	config := MetarConfig{}
-	err := config.ReadConfig("metar-fetcher.toml")
+	// Use Viper to read config (pairs nicely with cobra)
+	err := viper.Unmarshal(&config)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Unable to read config file")
 	}
@@ -165,6 +194,7 @@ func main() {
 	// Set up the logger
 	logger := internal.NewLogger(false)
 	defer logger.Close()
+	logger.Info().Msgf("Using config file: %s", viper.ConfigFileUsed())
 
 	var metars *addstogo.METARresponse
 
